@@ -1,0 +1,11 @@
+app_name: my-app
+services:
+  - name: api
+    command: python3 -m http.server 8000
+    working_directory: .
+  - name: worker
+    command: /bin/sh -c "while true; do echo worker; sleep 2; done"
+    working_directory: .
+profiles:
+  web: [api]
+  worker: [worker]
