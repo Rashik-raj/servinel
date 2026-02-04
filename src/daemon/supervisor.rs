@@ -19,6 +19,7 @@ struct ServiceRuntime {
     log_tx: broadcast::Sender<LogEntry>,
 }
 
+#[derive(Clone)]
 pub struct Supervisor {
     state: Arc<RwLock<DaemonState>>,
     runtimes: Arc<Mutex<HashMap<ServiceKey, ServiceRuntime>>>,
@@ -35,7 +36,7 @@ impl Supervisor {
     }
 
     pub async fn start_service(&self, app: &str, service: &str) -> Result<()> {
-        let (command, workdir) = {
+        let (command, workdir, pid) = {
             let state = self.state.read().await;
             let app_state = state
                 .apps
@@ -55,18 +56,31 @@ impl Supervisor {
                 .working_directory
                 .clone()
                 .unwrap_or(base_dir);
-            (svc_state.config.command.clone(), workdir)
+            (svc_state.config.command.clone(), workdir, svc_state.pid)
         };
+
+        if let Some(p) = pid {
+            // Try to kill any existing process group before starting
+            unsafe {
+                libc::kill(-(p as i32), libc::SIGKILL);
+            }
+        }
 
         let mut runtimes = self.runtimes.lock().await;
         if runtimes.contains_key(&(app.to_string(), service.to_string())) {
             return Ok(());
         }
 
+        let final_command = if command.trim().starts_with("exec ") {
+            format!("cd {} && {}", workdir.display(), command)
+        } else {
+            format!("cd {} && exec {}", workdir.display(), command)
+        };
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
-            .arg(command)
+            .arg(final_command)
             .current_dir(workdir)
+            .process_group(0) // Start in a new process group
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -95,15 +109,31 @@ impl Supervisor {
     }
 
     pub async fn stop_service(&self, app: &str, service: &str) -> Result<()> {
+        let pid = {
+            let state = self.state.read().await;
+            state.apps.get(app)
+                .and_then(|a| a.services.get(service))
+                .and_then(|s| s.pid)
+        };
+
+        if let Some(p) = pid {
+            // Always try to kill the process group first to ensure all descendants are gone
+            unsafe {
+                libc::kill(-(p as i32), libc::SIGKILL);
+            }
+        }
+
         let mut runtimes = self.runtimes.lock().await;
         if let Some(mut runtime) = runtimes.remove(&(app.to_string(), service.to_string())) {
-            let _ = runtime.child.kill().await;
-            let _ = runtime.child.wait().await;
+            tokio::spawn(async move {
+                let _ = runtime.child.wait().await;
+            });
         }
 
         let mut state = self.state.write().await;
         state.update_service_status(app, service, ServiceStatus::Stopped);
         state.set_service_pid(app, service, None);
+        state.set_service_start_time(app, service, None);
         state.set_exit_code(app, service, None);
         Ok(())
     }
@@ -162,17 +192,22 @@ impl Supervisor {
         // Apply updates to state
         let mut state = self.state.write().await;
         state.set_system_metrics(system_metrics.0, system_metrics.1, system_metrics.2);
-        for update in updates {
+        for update in &updates {
             match update {
                 RefreshUpdate::Exited { app, service, exit_code } => {
                     state.update_service_status(&app, &service, ServiceStatus::Exited);
                     state.set_service_pid(&app, &service, None);
-                    state.set_exit_code(&app, &service, exit_code);
+                    state.set_service_start_time(&app, &service, None);
+                    state.set_exit_code(&app, &service, *exit_code);
                 }
                 RefreshUpdate::Metrics { app, service, metrics } => {
-                    state.set_metrics(&app, &service, metrics);
+                    state.set_metrics(&app, &service, metrics.clone());
                 }
             }
+        }
+
+        if !updates.is_empty() {
+            let _ = state.save();
         }
 
         Ok(())

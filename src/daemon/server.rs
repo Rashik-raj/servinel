@@ -1,3 +1,4 @@
+use futures::future::join_all;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new() -> Self {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
+        let state = Arc::new(RwLock::new(DaemonState::load().unwrap_or_default()));
         let supervisor = Supervisor::new(state.clone());
         Self { state, supervisor }
     }
@@ -40,6 +41,7 @@ impl Daemon {
         for service in services {
             self.supervisor.start_service(&app_name, &service).await?;
         }
+        let _ = self.state.read().await.save();
         tracing::info!(?app_name, "daemon: up done");
         Ok(())
     }
@@ -63,28 +65,90 @@ impl Daemon {
         for service in services {
             self.supervisor.start_service(&app_name, &service).await?;
         }
+        let _ = self.state.read().await.save();
         Ok(())
     }
 
     pub async fn stop(&self, app: Option<String>, selector: ServiceSelector) -> Result<()> {
         let app_name = self.resolve_app(app).await?;
         let services = self.resolve_services(&app_name, &selector).await?;
+        
+        let mut futures = Vec::new();
         for service in services {
-            self.supervisor.stop_service(&app_name, &service).await?;
+            let app_name = app_name.clone();
+            let supervisor = self.supervisor.clone();
+            futures.push(async move {
+                supervisor.stop_service(&app_name, &service).await
+            });
         }
+        join_all(futures).await;
+        
+        let _ = self.state.read().await.save();
         Ok(())
     }
 
     pub async fn restart(&self, app: Option<String>, selector: ServiceSelector) -> Result<()> {
         let app_name = self.resolve_app(app).await?;
         let services = self.resolve_services(&app_name, &selector).await?;
-        for service in services.iter() {
-            self.supervisor.stop_service(&app_name, service).await?;
+        
+        let mut stop_futures = Vec::new();
+        for service in &services {
+            let app_name = app_name.clone();
+            let service = service.clone();
+            let supervisor = self.supervisor.clone();
+            stop_futures.push(async move {
+                supervisor.stop_service(&app_name, &service).await
+            });
         }
+        join_all(stop_futures).await;
+
+        let mut start_futures = Vec::new();
         for service in services {
-            self.supervisor.start_service(&app_name, &service).await?;
+            let app_name = app_name.clone();
+            let supervisor = self.supervisor.clone();
+            start_futures.push(async move {
+                supervisor.start_service(&app_name, &service).await
+            });
         }
+        join_all(start_futures).await;
+        
+        let _ = self.state.read().await.save();
         Ok(())
+    }
+
+    pub async fn down(&self, app: Option<String>) -> Result<bool> {
+        let app_name = self.resolve_app(app).await?;
+        
+        // Stop all services first
+        let services = self.resolve_services(&app_name, &ServiceSelector::All).await?;
+        let mut stop_futures = Vec::new();
+        for service in &services {
+            let app_name = app_name.clone();
+            let service = service.clone();
+            let supervisor = self.supervisor.clone();
+            stop_futures.push(async move {
+                supervisor.stop_service(&app_name, &service).await
+            });
+        }
+        join_all(stop_futures).await;
+
+        // Remove app from state
+        {
+            let mut state = self.state.write().await;
+            state.remove_app(&app_name);
+            let _ = state.save();
+        }
+
+        // Check if we should shutdown
+        let should_shutdown = self.state.read().await.apps.is_empty();
+        if should_shutdown {
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                std::process::exit(0);
+            });
+        }
+
+        Ok(should_shutdown)
     }
 
     pub async fn status(&self, app: Option<String>, selector: ServiceSelector) -> Result<StatusSnapshot> {
@@ -187,8 +251,11 @@ impl Daemon {
     }
 
     pub async fn register_app(&self, compose: ComposeFile, path: PathBuf) {
-        let mut state = self.state.write().await;
-        state.insert_app(compose, path);
+        {
+            let mut state = self.state.write().await;
+            state.insert_app(compose, path);
+        }
+        let _ = self.state.read().await.save();
     }
 
     pub async fn resolve_app(&self, app: Option<String>) -> Result<String> {
@@ -258,11 +325,21 @@ fn build_snapshot(app_state: &crate::daemon::state::AppState, services: Vec<Stri
     let mut service_snapshots = Vec::new();
     for name in services {
         if let Some(service) = app_state.services.get(&name) {
+            let uptime_secs = if matches!(
+                service.status,
+                crate::daemon::state::ServiceStatus::Running
+                    | crate::daemon::state::ServiceStatus::Starting
+            ) {
+                uptime_seconds(service.started_at)
+            } else {
+                None
+            };
+
             service_snapshots.push(ServiceSnapshot {
                 name: service.config.name.clone(),
                 status: service.status.as_str().to_string(),
                 pid: service.pid,
-                uptime_secs: uptime_seconds(service.started_at),
+                uptime_secs,
                 exit_code: service.exit_code,
                 metrics: service.metrics.clone(),
             });

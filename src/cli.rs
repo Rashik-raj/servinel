@@ -88,6 +88,12 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    Down {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 pub async fn execute(cli: Cli) -> Result<()> {
@@ -135,9 +141,32 @@ pub async fn execute(cli: Cli) -> Result<()> {
         Commands::Stop { service, profile, app } => {
             ensure_daemon().await?;
             let app = resolve_app_name(app).await?;
-            let selector = selector_from_options(service, profile, false)?;
+            let selector = selector_from_options(service, profile, true)?;
             let request = Request::Stop { app: Some(app), selector };
             handle_simple(request).await?;
+        }
+        Commands::Down { app, file } => {
+            ensure_daemon().await?;
+            // If file is provided, use it to resolve app name
+            let app = if let Some(file) = file {
+                let compose = load_compose(&file)?;
+                compose.app_name
+            } else {
+                resolve_app_name(app).await?
+            };
+            
+            let request = Request::Down { app: Some(app) };
+            match request_response(&request).await? {
+                Response::Ack => {
+                    println!("App stopped and removed.");
+                }
+                Response::DaemonShutdown => {
+                    println!("App stopped and removed.");
+                    println!("Daemon shutdown as no apps remain.");
+                }
+                Response::Error(message) => return Err(ServinelError::Usage(message)),
+                _ => {}
+            }
         }
         Commands::Restart {
             service,
@@ -147,7 +176,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
         } => {
             ensure_daemon().await?;
             let app = resolve_app_name(app).await?;
-            let selector = selector_from_options(service, profile, false)?;
+            let selector = selector_from_options(service, profile, true)?;
             let request = Request::Restart { app: Some(app), selector };
             handle_simple(request).await?;
             if !no_tui {

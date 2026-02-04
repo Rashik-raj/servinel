@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ServinelError};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ComposeFile {
     pub app_name: String,
     pub services: Vec<ServiceConfig>,
@@ -13,7 +13,7 @@ pub struct ComposeFile {
     pub profiles: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServiceConfig {
     pub name: String,
     pub command: String,

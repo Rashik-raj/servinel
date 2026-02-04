@@ -49,3 +49,9 @@ impl LogBuffer {
         self.entries.iter().cloned().collect()
     }
 }
+
+impl Default for LogBuffer {
+    fn default() -> Self {
+        Self::new(1000)
+    }
+}

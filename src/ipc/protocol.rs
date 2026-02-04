@@ -46,6 +46,9 @@ pub enum Request {
     Profiles {
         app: Option<String>,
     },
+    Down {
+        app: Option<String>,
+    },
     DashAttach,
 }
 
@@ -56,6 +59,7 @@ pub enum Response {
     StatusSnapshot(StatusSnapshot),
     ProfilesList(Vec<String>),
     LogChunk(LogChunk),
+    DaemonShutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

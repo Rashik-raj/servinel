@@ -106,6 +106,19 @@ async fn handle_connection(stream: UnixStream, daemon: Arc<Daemon>) -> Result<()
         Request::DashAttach => {
             write_response(&mut write, &Response::Ack).await?;
         }
+        Request::Down { app } => {
+            match daemon.down(app).await {
+                Ok(true) => {
+                    write_response(&mut write, &Response::DaemonShutdown).await?;
+                }
+                Ok(false) => {
+                    write_response(&mut write, &Response::Ack).await?;
+                }
+                Err(err) => {
+                    write_response(&mut write, &Response::Error(err.to_string())).await?;
+                }
+            }
+        }
     }
 
     Ok(())

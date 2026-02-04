@@ -1,6 +1,6 @@
 [package]
 name = "servinel"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 authors = ["Rashikraj Shrestha <rashik123.rs@gmail.com>"]
 description = "Service manager and supervisor with TUI dashboard"
@@ -28,3 +28,5 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 thiserror = "2.0.11"
 tui-piechart = "0.2.8"
 clap_complete = "4.5.38"
+libc = "0.2"
+futures = "0.3.31"

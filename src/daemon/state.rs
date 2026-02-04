@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
+use serde::{Deserialize, Serialize};
 
 use crate::compose::{ComposeFile, ServiceConfig};
 use crate::logs::{LogBuffer, LogEntry};
@@ -7,8 +8,7 @@ use crate::metrics::ServiceMetrics;
 
 const LOG_BUFFER_CAPACITY: usize = 1000;
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceStatus {
     Starting,
     Running,
@@ -29,18 +29,20 @@ impl ServiceStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceState {
     pub config: ServiceConfig,
     pub status: ServiceStatus,
     pub pid: Option<u32>,
     pub started_at: Option<SystemTime>,
     pub exit_code: Option<i32>,
+    #[serde(skip)]
     pub logs: LogBuffer,
+    #[serde(default)]
     pub metrics: ServiceMetrics,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
     pub app_name: String,
     pub compose_path: std::path::PathBuf,
@@ -48,11 +50,14 @@ pub struct AppState {
     pub services: HashMap<String, ServiceState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DaemonState {
     pub apps: HashMap<String, AppState>,
+    #[serde(default)]
     pub system_cpu: f32,
+    #[serde(default)]
     pub system_memory_used: u64,
+    #[serde(default)]
     pub system_memory_total: u64,
 }
 
@@ -85,6 +90,10 @@ impl DaemonState {
         self.apps.insert(compose.app_name, app);
     }
 
+    pub fn remove_app(&mut self, app: &str) -> Option<AppState> {
+        self.apps.remove(app)
+    }
+
     pub fn list_apps(&self) -> Vec<String> {
         self.apps.keys().cloned().collect()
     }
@@ -92,7 +101,10 @@ impl DaemonState {
     pub fn update_service_status(&mut self, app: &str, service: &str, status: ServiceStatus) {
         if let Some(app_state) = self.apps.get_mut(app) {
             if let Some(service_state) = app_state.services.get_mut(service) {
-                service_state.status = status;
+                service_state.status = status.clone();
+                if !matches!(status, ServiceStatus::Running | ServiceStatus::Starting) {
+                    service_state.started_at = None;
+                }
             }
         }
     }
@@ -141,6 +153,30 @@ impl DaemonState {
         self.system_cpu = cpu;
         self.system_memory_used = used;
         self.system_memory_total = total;
+    }
+
+    pub fn save(&self) -> crate::error::Result<()> {
+        let path = crate::util::app_data_dir()?.join("state.json");
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn load() -> crate::error::Result<Self> {
+        let path = crate::util::app_data_dir()?.join("state.json");
+        if !path.exists() {
+            return Ok(DaemonState::default());
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut state: DaemonState = serde_json::from_str(&content)?;
+        // Reset volatile state
+        for app in state.apps.values_mut() {
+            for service in app.services.values_mut() {
+                service.metrics = ServiceMetrics::default();
+                // Logs are already skipped by #[serde(skip)]
+            }
+        }
+        Ok(state)
     }
 }
 
