@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 use tui_piechart::{PieChart, PieSlice};
 
@@ -59,9 +59,58 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(chunks[2]);
 
+    let log_area = body[0];
+    let visible_height = log_area.height.saturating_sub(2) as usize; // Borders
+    let total_lines = app.logs.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+
+    let effective_scroll = if app.autoscroll {
+        max_scroll
+    } else {
+        app.scroll.min(max_scroll)
+    };
+
     let log_text = Text::from(app.logs.join("\n"));
-    let logs = Paragraph::new(log_text).block(Block::default().borders(Borders::ALL).title("Logs"));
-    frame.render_widget(logs, body[0]);
+    let logs = Paragraph::new(log_text)
+        .block(Block::default().borders(Borders::ALL).title("Logs"))
+        .scroll((effective_scroll as u16, app.scroll_x)); // Use scroll_x here
+    frame.render_widget(logs, log_area);
+
+    let scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"));
+    let mut scrollbar_state = ScrollbarState::new(max_scroll).position(effective_scroll);
+    frame.render_stateful_widget(
+        scrollbar,
+        log_area.inner(ratatui::layout::Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut scrollbar_state,
+    );
+    
+    // Horizontal scrollbar
+    let max_width = app.logs.iter().map(|l| l.len()).max().unwrap_or(0);
+    // Arbitrary reasonable max scroll view width, or try to detect visible width. 
+    // Usually we want max_width - visible_width.
+    let visible_width = log_area.width.saturating_sub(2) as usize; 
+    let max_scroll_x = max_width.saturating_sub(visible_width);
+    
+    let scrollbar_x = Scrollbar::default()
+        .orientation(ScrollbarOrientation::HorizontalBottom)
+        .thumb_symbol("■")
+        .begin_symbol(Some("←"))
+        .end_symbol(Some("→"));
+    let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(app.scroll_x as usize);
+     frame.render_stateful_widget(
+        scrollbar_x,
+        log_area.inner(ratatui::layout::Margin {
+            vertical: 0,
+            horizontal: 1,
+        }),
+        &mut scrollbar_x_state,
+    );
 
     let stats_lines = if let Some(service) = app.selected_service() {
         vec![
@@ -91,7 +140,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
                     .unwrap_or_else(|| "-".to_string())
             )),
             Line::from(format!("CPU: {:.2}%", service.metrics.cpu)),
-            Line::from(format!("Memory: {} KB", service.metrics.memory)),
+            Line::from(format!("Memory: {:.1} MB", service.metrics.memory as f64 / 1024.0 / 1024.0)),
         ]
     } else {
         vec![Line::from("No service selected")]
@@ -123,7 +172,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(mem_chart, pie_chunks[1]);
 
     let help = Paragraph::new(
-        "Keys: Tab/Shift+Tab apps  Left/Right services  s start  x stop  r restart  q quit",
+        "Keys: Tab/Shift+Tab apps  Left/Right services  Up/Down scroll  Shift+Up/Down scroll horiz  s start  x stop  r restart  q quit",
     )
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, chunks[3]);
@@ -146,4 +195,5 @@ fn pie_widget<'a>(
         .block(Block::default().borders(Borders::ALL).title(title))
         .show_percentages(true)
         .show_legend(true)
+        .resolution(tui_piechart::Resolution::Braille)
 }

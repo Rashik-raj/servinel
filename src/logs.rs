@@ -48,6 +48,10 @@ impl LogBuffer {
     pub fn all(&self) -> Vec<LogEntry> {
         self.entries.iter().cloned().collect()
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl Default for LogBuffer {

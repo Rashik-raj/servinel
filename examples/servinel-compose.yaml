@@ -1,11 +1,11 @@
 app_name: my-app
 services:
-  - name: api
-    command: python3 -m http.server 8000
-    working_directory: .
-  - name: worker
-    command: /bin/sh -c "while true; do echo worker; sleep 2; done"
-    working_directory: .
+  - name: server1
+    command: uv run main.py
+    working_directory: ./server1
+  - name: server2
+    command: uv run main.py
+    working_directory: ./server2
 profiles:
-  web: [api]
-  worker: [worker]
+  server: [server1]
+  client: [server2]

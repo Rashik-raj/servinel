@@ -101,6 +101,7 @@ impl Supervisor {
         );
 
         let mut state = self.state.write().await;
+        state.clear_service_logs(app, service);
         state.update_service_status(app, service, ServiceStatus::Running);
         state.set_service_pid(app, service, pid);
         state.set_service_start_time(app, service, Some(SystemTime::now()));
@@ -135,6 +136,7 @@ impl Supervisor {
         state.set_service_pid(app, service, None);
         state.set_service_start_time(app, service, None);
         state.set_exit_code(app, service, None);
+        state.set_metrics(app, service, crate::metrics::ServiceMetrics::default());
         Ok(())
     }
 
@@ -199,9 +201,17 @@ impl Supervisor {
                     state.set_service_pid(&app, &service, None);
                     state.set_service_start_time(&app, &service, None);
                     state.set_exit_code(&app, &service, *exit_code);
+                    state.set_metrics(&app, &service, ServiceMetrics::default());
                 }
                 RefreshUpdate::Metrics { app, service, metrics } => {
-                    state.set_metrics(&app, &service, metrics.clone());
+                     // Check if service is still running to prevent overwriting 'Stopped' state with stale metrics
+                    if let Some(app_state) = state.apps.get(app.as_str()) {
+                        if let Some(svc_state) = app_state.services.get(service.as_str()) {
+                            if matches!(svc_state.status, ServiceStatus::Running | ServiceStatus::Starting) {
+                                state.set_metrics(&app, &service, metrics.clone());
+                            }
+                        }
+                    }
                 }
             }
         }

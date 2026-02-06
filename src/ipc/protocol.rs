@@ -101,9 +101,15 @@ pub fn format_log_entry(entry: &LogEntry, merged: bool, service: &str) -> String
         LogStream::Stdout => "stdout",
         LogStream::Stderr => "stderr",
     };
+    
+    let time = chrono::DateTime::from_timestamp(entry.timestamp as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local))
+        .unwrap_or_default();
+    let time_str = time.format("%Y-%m-%d %H:%M:%S");
+
     if merged {
-        format!("[{}] {}", service, entry.line)
+        format!("[{}] [{}] {}", time_str, service, entry.line)
     } else {
-        format!("[{}:{}] {}", service, prefix, entry.line)
+        format!("[{}] [{}:{}] {}", time_str, service, prefix, entry.line)
     }
 }

@@ -141,6 +141,14 @@ impl DaemonState {
         }
     }
 
+    pub fn clear_service_logs(&mut self, app: &str, service: &str) {
+        if let Some(app_state) = self.apps.get_mut(app) {
+            if let Some(service_state) = app_state.services.get_mut(service) {
+                service_state.logs.clear();
+            }
+        }
+    }
+
     pub fn set_metrics(&mut self, app: &str, service: &str, metrics: ServiceMetrics) {
         if let Some(app_state) = self.apps.get_mut(app) {
             if let Some(service_state) = app_state.services.get_mut(service) {
