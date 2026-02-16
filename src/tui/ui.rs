@@ -176,8 +176,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     } else {
         0.0
     };
-    let cpu_chart = pie_widget("CPU", cpu_percent, Color::LightRed, Color::DarkGray);
-    let mem_chart = pie_widget("RAM", mem_percent, Color::LightGreen, Color::DarkGray);
+    let cpu_title = format!("CPU {:.1}%", cpu_percent);
+    let cpu_chart = pie_widget(&cpu_title, cpu_percent, Color::LightRed, Color::DarkGray);
+    let mem_title = format!("RAM {:.1}%", mem_percent);
+    let mem_chart = pie_widget(&mem_title, mem_percent, Color::LightGreen, Color::DarkGray);
     frame.render_widget(cpu_chart, pie_chunks[0]);
     frame.render_widget(mem_chart, pie_chunks[1]);
 

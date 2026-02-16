@@ -48,6 +48,8 @@ pub struct AppState {
     pub compose_path: std::path::PathBuf,
     pub profiles: HashMap<String, Vec<String>>,
     pub services: HashMap<String, ServiceState>,
+    /// Preserves declaration order from the compose file
+    pub service_order: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -63,6 +65,7 @@ pub struct DaemonState {
 
 impl DaemonState {
     pub fn insert_app(&mut self, compose: ComposeFile, compose_path: std::path::PathBuf) {
+        let service_order: Vec<String> = compose.services.iter().map(|s| s.name.clone()).collect();
         let services = compose
             .services
             .into_iter()
@@ -85,6 +88,7 @@ impl DaemonState {
             compose_path,
             profiles: compose.profiles.clone(),
             services,
+            service_order,
         };
 
         self.apps.insert(compose.app_name, app);
