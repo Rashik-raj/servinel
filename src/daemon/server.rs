@@ -162,7 +162,7 @@ impl Daemon {
             }
             let state = self.state.read().await;
             for app_state in state.apps.values() {
-                apps.push(build_snapshot(app_state, app_state.services.keys().cloned().collect()));
+                apps.push(build_snapshot(app_state, app_state.service_order.clone()));
             }
             return Ok(StatusSnapshot {
                 apps,
@@ -286,7 +286,7 @@ impl Daemon {
             .ok_or_else(|| ServinelError::AppNotFound(app.to_string()))?;
 
         let services = match selector {
-            ServiceSelector::All => app_state.services.keys().cloned().collect(),
+            ServiceSelector::All => app_state.service_order.clone(),
             ServiceSelector::Service(name) => vec![name.clone()],
             ServiceSelector::Services(names) => names.clone(),
             ServiceSelector::Profile(profile) => app_state

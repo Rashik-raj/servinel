@@ -7,7 +7,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use crossterm::execute;
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::{CompletedFrame, Terminal};
 
 use crate::error::Result;
 use crate::ipc::client::{request_response, stream_logs};
@@ -38,7 +38,8 @@ pub async fn run() -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_millis(50));
     let mut should_quit = false;
 
-    terminal.draw(|frame| ui::draw(frame, &app))?;
+    let completed = terminal.draw(|frame| ui::draw(frame, &mut app))?;
+    capture_screen_buffer(&mut app, &completed);
 
     while !should_quit {
         interval.tick().await;
@@ -132,6 +133,29 @@ pub async fn run() -> Result<()> {
                         MouseEventKind::ScrollRight => {
                             app.scroll_right();
                         }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            // Tab clicks take priority; otherwise start text selection in logs
+                            if app.click_app_tab(mouse.column, mouse.row)
+                                || app.click_service_tab(mouse.column, mouse.row)
+                            {
+                                app.clear_selection();
+                            } else {
+                                app.start_selection(mouse.column, mouse.row);
+                            }
+                        }
+                        MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                            app.update_selection(mouse.column, mouse.row);
+                        }
+                        MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                            if app.selecting {
+                                app.finish_selection();
+                                if let Some(text) = app.get_selected_text() {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(text);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -142,7 +166,8 @@ pub async fn run() -> Result<()> {
         refresh_status(&mut app).await?;
         refresh_logs(&mut app).await?;
 
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        let completed = terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        capture_screen_buffer(&mut app, &completed);
     }
 
     restore_terminal(terminal)?;
@@ -207,4 +232,22 @@ fn restore_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Capture the rendered frame buffer into app.screen_buffer for text selection.
+fn capture_screen_buffer(app: &mut TuiApp, completed: &CompletedFrame<'_>) {
+    let buf = &completed.buffer;
+    let area = completed.area;
+    let mut screen_lines = Vec::with_capacity(area.height as usize);
+    for y in 0..area.height {
+        let mut line = String::new();
+        for x in 0..area.width {
+            let pos = ratatui::layout::Position { x, y };
+            if let Some(cell) = buf.cell(pos) {
+                line.push_str(cell.symbol());
+            }
+        }
+        screen_lines.push(line);
+    }
+    app.screen_buffer = screen_lines;
 }
