@@ -18,9 +18,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         ])
         .split(frame.area());
 
-    // Store layout areas for mouse click detection
+    // Store layout areas for mouse interaction
     app.app_tab_area = chunks[0];
     app.service_tab_area = chunks[1];
+    app.help_area = chunks[3];
 
     let app_titles: Vec<Line> = app
         .apps
@@ -64,7 +65,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .split(chunks[2]);
 
     let log_area = body[0];
-    let visible_height = log_area.height.saturating_sub(2) as usize; // Borders
+    app.log_area = log_area;
+
+    let visible_height = log_area.height.saturating_sub(2) as usize;
     let total_lines = app.logs.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
 
@@ -93,19 +96,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }),
         &mut scrollbar_state,
     );
-    
+
     // Horizontal scrollbar
     let max_width = app.logs.iter().map(|l| l.len()).max().unwrap_or(0);
-    let visible_width = log_area.width.saturating_sub(2) as usize; 
+    let visible_width = log_area.width.saturating_sub(2) as usize;
     let max_scroll_x = max_width.saturating_sub(visible_width);
-    
+
     let scrollbar_x = Scrollbar::default()
         .orientation(ScrollbarOrientation::HorizontalBottom)
         .thumb_symbol("■")
         .begin_symbol(Some("←"))
         .end_symbol(Some("→"));
     let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(app.scroll_x as usize);
-     frame.render_stateful_widget(
+    frame.render_stateful_widget(
         scrollbar_x,
         log_area.inner(ratatui::layout::Margin {
             vertical: 0,
@@ -142,7 +145,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
                     .unwrap_or_else(|| "-".to_string())
             )),
             Line::from(format!("CPU: {:.2}%", service.metrics.cpu)),
-            Line::from(format!("Memory: {:.1} MB", service.metrics.memory as f64 / 1024.0 / 1024.0)),
+            Line::from(format!(
+                "Memory: {:.1} MB",
+                service.metrics.memory as f64 / 1024.0 / 1024.0
+            )),
         ]
     } else {
         vec![Line::from("No service selected")]
@@ -152,6 +158,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(9), Constraint::Min(0)])
         .split(body[1]);
+
+    app.status_area = status_chunks[0];
 
     let stats =
         Paragraph::new(stats_lines).block(Block::default().borders(Borders::ALL).title("Status"));
@@ -174,10 +182,39 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     frame.render_widget(mem_chart, pie_chunks[1]);
 
     let help = Paragraph::new(
-        "Keys: Tab/S-Tab apps  ←/→ services  ↑/↓ scroll  S-↑/↓ horiz  s start  x stop  r restart  q quit  (click apps/services to select)",
+        "Keys: Tab/S-Tab apps  ←/→ services  ↑/↓ scroll  s start  x stop  r restart  q quit  │  drag to select & copy",
     )
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, chunks[3]);
+
+    // ── Apply selection highlight over the rendered buffer ───────────
+    if let Some((sr, sc, er, ec)) = app.selection_range() {
+        let area = frame.area();
+        let buf = frame.buffer_mut();
+        let highlight = Style::default().bg(Color::White).fg(Color::Black);
+        for row in sr..=er {
+            if row >= area.height {
+                break;
+            }
+            let col_start = if row == sr { sc } else {
+                // For multi-line, start from the panel's left edge
+                app.selection_panel.map_or(0, |p| p.x)
+            };
+            let col_end = if row == er { ec } else {
+                // For multi-line, end at the panel's right edge
+                app.selection_panel.map_or(area.width, |p| p.x + p.width)
+            };
+            for col in col_start..col_end {
+                if col >= area.width {
+                    break;
+                }
+                let pos = ratatui::layout::Position { x: col, y: row };
+                if let Some(cell) = buf.cell_mut(pos) {
+                    cell.set_style(highlight);
+                }
+            }
+        }
+    }
 }
 
 fn pie_widget<'a>(
