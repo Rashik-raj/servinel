@@ -1,4 +1,5 @@
 use crate::ipc::protocol::{AppSnapshot, ServiceSnapshot};
+use ratatui::layout::Rect;
 
 #[derive(Debug)]
 pub struct TuiApp {
@@ -12,6 +13,9 @@ pub struct TuiApp {
     pub scroll: usize,
     pub scroll_x: u16,
     pub autoscroll: bool,
+    /// Stored layout areas for mouse click detection
+    pub app_tab_area: Rect,
+    pub service_tab_area: Rect,
 }
 
 impl Default for TuiApp {
@@ -27,6 +31,8 @@ impl Default for TuiApp {
             scroll: 0,
             scroll_x: 0,
             autoscroll: true,
+            app_tab_area: Rect::default(),
+            service_tab_area: Rect::default(),
         }
     }
 }
@@ -120,9 +126,6 @@ impl TuiApp {
     pub fn scroll_up(&mut self) {
         if self.autoscroll {
             self.autoscroll = false;
-            // Best guess: start from bottom. 
-            // We don't know window height here so we might jump a bit. 
-            // Ideally UI handles this but this is a reasonable default.
             self.scroll = self.logs.len().saturating_sub(1);
         } else if self.scroll > 0 {
             self.scroll -= 1;
@@ -132,8 +135,6 @@ impl TuiApp {
     pub fn scroll_down(&mut self) {
         if !self.autoscroll {
             self.scroll += 1;
-            // If we scroll past end, enable autoscroll? 
-            // Hard to detect without height, but reasonable bounds check:
             if self.scroll >= self.logs.len() {
                 self.autoscroll = true;
             }
@@ -151,7 +152,6 @@ impl TuiApp {
     }
     
     pub fn page_up(&mut self) {
-        // Approximate page size
         let page_size = 15;
         if self.autoscroll {
             self.autoscroll = false;
@@ -183,5 +183,75 @@ impl TuiApp {
     fn reset_scroll(&mut self) {
         self.scroll = 0;
         self.autoscroll = true;
+    }
+
+    /// Given a mouse click position, determine which app tab was clicked.
+    /// Returns true if a tab was selected.
+    pub fn click_app_tab(&mut self, column: u16, row: u16) -> bool {
+        let area = self.app_tab_area;
+        if row < area.y || row >= area.y + area.height
+            || column < area.x || column >= area.x + area.width
+        {
+            return false;
+        }
+        let names: Vec<String> = self.apps.iter().map(|a| a.app_name.clone()).collect();
+        if let Some(idx) = Self::tab_index_at(column, area, &names) {
+            if idx < self.apps.len() && idx != self.selected_app {
+                self.selected_app = idx;
+                self.selected_service = 0;
+                self.reset_scroll();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Given a mouse click position, determine which service tab was clicked.
+    /// Returns true if a tab was selected.
+    pub fn click_service_tab(&mut self, column: u16, row: u16) -> bool {
+        let area = self.service_tab_area;
+        if row < area.y || row >= area.y + area.height
+            || column < area.x || column >= area.x + area.width
+        {
+            return false;
+        }
+        let names: Vec<String> = self
+            .apps
+            .get(self.selected_app)
+            .map(|app| app.services.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+        if let Some(idx) = Self::tab_index_at(column, area, &names) {
+            if idx < names.len() && idx != self.selected_service {
+                self.selected_service = idx;
+                self.reset_scroll();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Map a click x-position to a tab index.
+    /// Ratatui Tabs layout: border(1) + for each tab: padding(1) + text + padding(1),
+    /// separated by divider(1).
+    fn tab_index_at(column: u16, area: Rect, names: &[String]) -> Option<usize> {
+        if names.is_empty() {
+            return None;
+        }
+        // x relative to inside the border
+        let rel_x = column.saturating_sub(area.x + 1) as usize;
+        let mut pos = 0;
+        for (i, name) in names.iter().enumerate() {
+            // Each tab: 1 (left pad) + name.len() + 1 (right pad) = name.len() + 2
+            let tab_width = name.len() + 2;
+            if rel_x < pos + tab_width {
+                return Some(i);
+            }
+            pos += tab_width;
+            // Divider between tabs: 1 char
+            if i < names.len() - 1 {
+                pos += 1;
+            }
+        }
+        None
     }
 }

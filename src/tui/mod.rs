@@ -38,7 +38,7 @@ pub async fn run() -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_millis(50));
     let mut should_quit = false;
 
-    terminal.draw(|frame| ui::draw(frame, &app))?;
+    terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
     while !should_quit {
         interval.tick().await;
@@ -132,6 +132,10 @@ pub async fn run() -> Result<()> {
                         MouseEventKind::ScrollRight => {
                             app.scroll_right();
                         }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            app.click_app_tab(mouse.column, mouse.row);
+                            app.click_service_tab(mouse.column, mouse.row);
+                        }
                         _ => {}
                     }
                 }
@@ -142,7 +146,7 @@ pub async fn run() -> Result<()> {
         refresh_status(&mut app).await?;
         refresh_logs(&mut app).await?;
 
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
     }
 
     restore_terminal(terminal)?;

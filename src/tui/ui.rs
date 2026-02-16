@@ -7,7 +7,7 @@ use tui_piechart::{PieChart, PieSlice};
 
 use crate::tui::app::TuiApp;
 
-pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -17,6 +17,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
             Constraint::Length(3),
         ])
         .split(frame.area());
+
+    // Store layout areas for mouse click detection
+    app.app_tab_area = chunks[0];
+    app.service_tab_area = chunks[1];
 
     let app_titles: Vec<Line> = app
         .apps
@@ -73,7 +77,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     let log_text = Text::from(app.logs.join("\n"));
     let logs = Paragraph::new(log_text)
         .block(Block::default().borders(Borders::ALL).title("Logs"))
-        .scroll((effective_scroll as u16, app.scroll_x)); // Use scroll_x here
+        .scroll((effective_scroll as u16, app.scroll_x));
     frame.render_widget(logs, log_area);
 
     let scrollbar = Scrollbar::default()
@@ -92,8 +96,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     
     // Horizontal scrollbar
     let max_width = app.logs.iter().map(|l| l.len()).max().unwrap_or(0);
-    // Arbitrary reasonable max scroll view width, or try to detect visible width. 
-    // Usually we want max_width - visible_width.
     let visible_width = log_area.width.saturating_sub(2) as usize; 
     let max_scroll_x = max_width.saturating_sub(visible_width);
     
@@ -172,7 +174,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(mem_chart, pie_chunks[1]);
 
     let help = Paragraph::new(
-        "Keys: Tab/Shift+Tab apps  Left/Right services  Up/Down scroll  Shift+Up/Down scroll horiz  s start  x stop  r restart  q quit",
+        "Keys: Tab/S-Tab apps  ←/→ services  ↑/↓ scroll  S-↑/↓ horiz  s start  x stop  r restart  q quit  (click apps/services to select)",
     )
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, chunks[3]);
