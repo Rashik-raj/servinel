@@ -1,9 +1,8 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Tabs, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
-use tui_piechart::{PieChart, PieSlice};
 
 use crate::tui::app::TuiApp;
 
@@ -177,11 +176,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         0.0
     };
     let cpu_title = format!("CPU {:.1}%", cpu_percent);
-    let cpu_chart = pie_widget(&cpu_title, cpu_percent, Color::LightRed, Color::DarkGray);
+    let cpu_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(cpu_title))
+        .gauge_style(Style::default().fg(Color::LightRed))
+        .percent(cpu_percent as u16);
+    frame.render_widget(cpu_gauge, pie_chunks[0]);
+
     let mem_title = format!("RAM {:.1}%", mem_percent);
-    let mem_chart = pie_widget(&mem_title, mem_percent, Color::LightGreen, Color::DarkGray);
-    frame.render_widget(cpu_chart, pie_chunks[0]);
-    frame.render_widget(mem_chart, pie_chunks[1]);
+    let mem_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(mem_title))
+        .gauge_style(Style::default().fg(Color::LightGreen))
+        .percent(mem_percent as u16);
+    frame.render_widget(mem_gauge, pie_chunks[1]);
 
     let help = Paragraph::new(
         "Keys: Tab/S-Tab apps  ←/→ services  ↑/↓ scroll  s start  x stop  r restart  q quit  │  drag to select & copy",
@@ -219,22 +225,4 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     }
 }
 
-fn pie_widget<'a>(
-    title: &'a str,
-    percent: f64,
-    used_color: Color,
-    free_color: Color,
-) -> PieChart<'a> {
-    let percent = percent.clamp(0.0, 100.0);
-    let used = percent as f64;
-    let free = 100.0 - percent;
-    let slices = vec![
-        PieSlice::new("Used", used, used_color),
-        PieSlice::new("Free", free, free_color),
-    ];
-    PieChart::new(slices)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .show_percentages(true)
-        .show_legend(true)
-        .resolution(tui_piechart::Resolution::Braille)
-}
+
