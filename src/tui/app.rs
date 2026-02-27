@@ -1,18 +1,43 @@
 use crate::ipc::protocol::{AppSnapshot, ServiceSnapshot};
 use ratatui::layout::Rect;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSelectionZone {
+    None,
+    Metadata,
+    Message,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub timestamp: String,
+    pub service: String,
+    pub message: String,
+}
+
+impl LogLine {
+    pub fn metadata_width(&self) -> usize {
+        // [YYYY-MM-DD HH:MM:SS] [service] 
+        // 2 (brackets) + timestamp.len() + 2 (space+bracket) + service.len() + 2 (bracket+space)
+        self.timestamp.len() + self.service.len() + 6
+    }
+}
+
 #[derive(Debug)]
 pub struct TuiApp {
     pub apps: Vec<AppSnapshot>,
     pub selected_app: usize,
     pub selected_service: usize,
-    pub logs: Vec<String>,
+    pub logs: Vec<LogLine>,
     pub system_cpu: f32,
     pub system_memory_used: u64,
     pub system_memory_total: u64,
     pub scroll: usize,
     pub scroll_x: u16,
     pub autoscroll: bool,
+    /// Last effective scroll used during rendering, for coordinate conversion
+    pub last_effective_scroll: usize,
+    pub last_effective_scroll_x: u16,
     /// Stored layout areas for mouse click detection and panel-constrained selection
     pub app_tab_area: Rect,
     pub service_tab_area: Rect,
@@ -23,10 +48,16 @@ pub struct TuiApp {
     pub screen_buffer: Vec<String>,
     /// The panel rect that the current selection is constrained to
     pub selection_panel: Option<Rect>,
-    /// Selection anchor in screen coordinates (row, col)
-    pub selection_anchor: Option<(u16, u16)>,
-    /// Selection end in screen coordinates (row, col)
-    pub selection_end: Option<(u16, u16)>,
+    /// Selection anchor: (row, col). For logs, this is (line_idx, char_idx).
+    /// For others, it's screen coordinates.
+    pub selection_anchor: Option<(usize, usize)>,
+    /// Selection end: (row, col). For logs, this is (line_idx, char_idx).
+    /// For others, it's screen coordinates.
+    pub selection_end: Option<(usize, usize)>,
+    /// Whether the current selection is anchored to log data coordinates
+    pub selection_is_log: bool,
+    /// Which zone within the log line is being selected
+    pub selection_zone: LogSelectionZone,
     /// Whether a drag selection is in progress
     pub selecting: bool,
 }
@@ -44,6 +75,8 @@ impl Default for TuiApp {
             scroll: 0,
             scroll_x: 0,
             autoscroll: true,
+            last_effective_scroll: 0,
+            last_effective_scroll_x: 0,
             app_tab_area: Rect::default(),
             service_tab_area: Rect::default(),
             log_area: Rect::default(),
@@ -53,6 +86,8 @@ impl Default for TuiApp {
             selection_panel: None,
             selection_anchor: None,
             selection_end: None,
+            selection_is_log: false,
+            selection_zone: LogSelectionZone::None,
             selecting: false,
         }
     }
@@ -201,6 +236,19 @@ impl TuiApp {
         self.autoscroll = true;
     }
 
+    pub fn calculate_effective_scroll(&self) -> (usize, u16) {
+        let visible_height = self.log_area.height.saturating_sub(2) as usize;
+        let total_lines = self.logs.len();
+        let max_scroll = total_lines.saturating_sub(visible_height);
+
+        let sy = if self.autoscroll {
+            max_scroll
+        } else {
+            self.scroll.min(max_scroll)
+        };
+        (sy, self.scroll_x)
+    }
+
     fn reset_scroll(&mut self) {
         self.scroll = 0;
         self.autoscroll = true;
@@ -300,9 +348,38 @@ impl TuiApp {
     pub fn start_selection(&mut self, column: u16, row: u16) {
         if let Some(panel) = self.panel_at(column, row) {
             self.selection_panel = Some(panel);
-            self.selection_anchor = Some((row, column));
-            self.selection_end = Some((row, column));
             self.selecting = true;
+            
+            if panel == self.log_area {
+                self.selection_is_log = true;
+                let sy = self.last_effective_scroll;
+                let sx = self.last_effective_scroll_x;
+                let log_row = (row.saturating_sub(panel.y + 1) as usize) + sy;
+                let log_col_screen = column.saturating_sub(panel.x + 1) as usize + sx as usize;
+                
+                if let Some(line) = self.logs.get(log_row) {
+                    let m_width = line.metadata_width();
+                    if log_col_screen < m_width {
+                        self.selection_zone = LogSelectionZone::Metadata;
+                        self.selection_anchor = Some((log_row, log_col_screen));
+                        self.selection_end = Some((log_row, log_col_screen));
+                    } else {
+                        self.selection_zone = LogSelectionZone::Message;
+                        let msg_col = log_col_screen - m_width;
+                        self.selection_anchor = Some((log_row, msg_col));
+                        self.selection_end = Some((log_row, msg_col));
+                    }
+                } else {
+                    self.selection_zone = LogSelectionZone::Message;
+                    self.selection_anchor = Some((log_row, 0));
+                    self.selection_end = Some((log_row, 0));
+                }
+            } else {
+                self.selection_is_log = false;
+                self.selection_zone = LogSelectionZone::None;
+                self.selection_anchor = Some((row as usize, column as usize));
+                self.selection_end = Some((row as usize, column as usize));
+            }
         }
     }
 
@@ -313,7 +390,30 @@ impl TuiApp {
         }
         if let Some(panel) = self.selection_panel {
             let (c, r) = Self::clamp_to_panel(column, row, panel);
-            self.selection_end = Some((r, c));
+            
+            if self.selection_is_log {
+                let sy = self.last_effective_scroll;
+                let sx = self.last_effective_scroll_x;
+                let log_row = (r.saturating_sub(panel.y + 1) as usize) + sy;
+                let log_col_screen = c.saturating_sub(panel.x + 1) as usize + sx as usize;
+                
+                match self.selection_zone {
+                    LogSelectionZone::Metadata => {
+                        self.selection_end = Some((log_row, log_col_screen));
+                    }
+                    LogSelectionZone::Message => {
+                        // Clamp to message area if possible
+                        let m_width = self.logs.get(log_row).map(|l| l.metadata_width()).unwrap_or(0);
+                        let msg_col = log_col_screen.saturating_sub(m_width);
+                        self.selection_end = Some((log_row, msg_col));
+                    }
+                    LogSelectionZone::None => {
+                        self.selection_end = Some((log_row, log_col_screen));
+                    }
+                }
+            } else {
+                self.selection_end = Some((r as usize, c as usize));
+            }
         }
     }
 
@@ -327,11 +427,13 @@ impl TuiApp {
         self.selection_panel = None;
         self.selection_anchor = None;
         self.selection_end = None;
+        self.selection_is_log = false;
+        self.selection_zone = LogSelectionZone::None;
         self.selecting = false;
     }
 
     /// Returns the normalized selection range: (start_row, start_col, end_row, end_col).
-    pub fn selection_range(&self) -> Option<(u16, u16, u16, u16)> {
+    pub fn selection_range(&self) -> Option<(usize, usize, usize, usize)> {
         match (self.selection_anchor, self.selection_end) {
             (Some((sr, sc)), Some((er, ec))) => {
                 if (sr, sc) == (er, ec) {
@@ -347,34 +449,73 @@ impl TuiApp {
         }
     }
 
-    /// Extract selected text from the screen buffer, trimming trailing whitespace per line.
+    /// Extract selected text from the screen buffer or logs history.
     pub fn get_selected_text(&self) -> Option<String> {
         let (sr, sc, er, ec) = self.selection_range()?;
 
         let mut lines: Vec<String> = Vec::new();
-        for row in sr..=er {
-            let row_idx = row as usize;
-            if row_idx >= self.screen_buffer.len() {
-                break;
+        
+        if self.selection_is_log {
+            for row in sr..=er {
+                if row >= self.logs.len() {
+                    break;
+                }
+                
+                let line = &self.logs[row];
+                let line_chars: Vec<char> = match self.selection_zone {
+                    LogSelectionZone::Metadata => {
+                        format!("[{}] [{}] ", line.timestamp, line.service).chars().collect()
+                    }
+                    LogSelectionZone::Message => {
+                        line.message.chars().collect()
+                    }
+                    LogSelectionZone::None => {
+                        Vec::new()
+                    }
+                };
+                
+                let line_len = line_chars.len();
+
+                let extracted = if sr == er {
+                    let s = sc.min(line_len);
+                    let e = ec.min(line_len);
+                    line_chars[s..e].iter().collect::<String>()
+                } else if row == sr {
+                    let s = sc.min(line_len);
+                    line_chars[s..].iter().collect::<String>()
+                } else if row == er {
+                    let e = ec.min(line_len);
+                    line_chars[..e].iter().collect::<String>()
+                } else {
+                    line_chars.iter().collect::<String>()
+                };
+
+                lines.push(extracted.trim_end().to_string());
             }
-            let line_chars: Vec<char> = self.screen_buffer[row_idx].chars().collect();
-            let line_len = line_chars.len();
+        } else {
+            for row in sr..=er {
+                if row >= self.screen_buffer.len() {
+                    break;
+                }
+                let line_chars: Vec<char> = self.screen_buffer[row].chars().collect();
+                let line_len = line_chars.len();
 
-            let extracted = if sr == er {
-                let s = (sc as usize).min(line_len);
-                let e = (ec as usize).min(line_len);
-                line_chars[s..e].iter().collect::<String>()
-            } else if row == sr {
-                let s = (sc as usize).min(line_len);
-                line_chars[s..].iter().collect::<String>()
-            } else if row == er {
-                let e = (ec as usize).min(line_len);
-                line_chars[..e].iter().collect::<String>()
-            } else {
-                line_chars.iter().collect::<String>()
-            };
+                let extracted = if sr == er {
+                    let s = sc.min(line_len);
+                    let e = ec.min(line_len);
+                    line_chars[s..e].iter().collect::<String>()
+                } else if row == sr {
+                    let s = sc.min(line_len);
+                    line_chars[s..].iter().collect::<String>()
+                } else if row == er {
+                    let e = ec.min(line_len);
+                    line_chars[..e].iter().collect::<String>()
+                } else {
+                    line_chars.iter().collect::<String>()
+                };
 
-            lines.push(extracted.trim_end().to_string());
+                lines.push(extracted.trim_end().to_string());
+            }
         }
 
         let result = lines.join("\n");

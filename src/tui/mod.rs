@@ -11,7 +11,7 @@ use ratatui::{CompletedFrame, Terminal};
 
 use crate::error::Result;
 use crate::ipc::client::{request_response, stream_logs};
-use crate::ipc::protocol::{format_log_entry, Request, Response, ServiceSelector};
+use crate::ipc::protocol::{Request, Response, ServiceSelector};
 use crate::tui::app::TuiApp;
 
 mod app;
@@ -209,11 +209,20 @@ async fn refresh_logs(app: &mut TuiApp) -> Result<()> {
         merged: true,
     };
 
-    let mut lines = Vec::new();
+    let mut log_lines = Vec::new();
     let response = tokio::time::timeout(
         Duration::from_millis(600),
         stream_logs(&request, |chunk| {
-            lines.push(format_log_entry(&chunk.entry, true, &chunk.service));
+            let time = chrono::DateTime::from_timestamp(chunk.entry.timestamp as i64, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local))
+                .unwrap_or_default();
+            let time_str = time.format("%Y-%m-%d %H:%M:%S").to_string();
+            
+            log_lines.push(crate::tui::app::LogLine {
+                timestamp: time_str,
+                service: chunk.service.clone(),
+                message: chunk.entry.line.clone(),
+            });
         }),
     )
     .await;
@@ -223,7 +232,7 @@ async fn refresh_logs(app: &mut TuiApp) -> Result<()> {
     if response.unwrap().is_err() {
         return Ok(());
     }
-    app.logs = lines;
+    app.logs = log_lines;
     Ok(())
 }
 
