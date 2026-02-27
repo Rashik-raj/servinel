@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Tabs, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
@@ -67,19 +67,24 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     app.log_area = log_area;
 
     let visible_height = log_area.height.saturating_sub(2) as usize;
-    let total_lines = app.logs.len();
-    let max_scroll = total_lines.saturating_sub(visible_height);
 
-    let effective_scroll = if app.autoscroll {
-        max_scroll
-    } else {
-        app.scroll.min(max_scroll)
-    };
+    let (effective_scroll, scroll_x) = app.calculate_effective_scroll();
+    app.last_effective_scroll = effective_scroll;
+    app.last_effective_scroll_x = scroll_x;
+    let max_scroll = app.logs.len().saturating_sub(visible_height);
 
-    let log_text = Text::from(app.logs.join("\n"));
-    let logs = Paragraph::new(log_text)
+    let mut log_lines = Vec::new();
+    for log in &app.logs {
+        log_lines.push(Line::from(vec![
+            Span::styled(format!("[{}] ", log.timestamp), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("[{}] ", log.service), Style::default().fg(Color::Blue)),
+            Span::raw(&log.message),
+        ]));
+    }
+    
+    let logs = Paragraph::new(log_lines)
         .block(Block::default().borders(Borders::ALL).title("Logs"))
-        .scroll((effective_scroll as u16, app.scroll_x));
+        .scroll((effective_scroll as u16, scroll_x));
     frame.render_widget(logs, log_area);
 
     let scrollbar = Scrollbar::default()
@@ -97,16 +102,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     );
 
     // Horizontal scrollbar
-    let max_width = app.logs.iter().map(|l| l.len()).max().unwrap_or(0);
+    // max_width should only consider the message part since selection is only on that
+    let max_msg_width = app.logs.iter().map(|l| l.message.len()).max().unwrap_or(0);
     let visible_width = log_area.width.saturating_sub(2) as usize;
-    let max_scroll_x = max_width.saturating_sub(visible_width);
+    let max_scroll_x = max_msg_width.saturating_sub(visible_width);
 
     let scrollbar_x = Scrollbar::default()
         .orientation(ScrollbarOrientation::HorizontalBottom)
         .thumb_symbol("■")
         .begin_symbol(Some("←"))
         .end_symbol(Some("→"));
-    let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(app.scroll_x as usize);
+    let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(scroll_x as usize);
     frame.render_stateful_widget(
         scrollbar_x,
         log_area.inner(ratatui::layout::Margin {
@@ -195,30 +201,78 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, chunks[3]);
 
-    // ── Apply selection highlight over the rendered buffer ───────────
+    // ── Apply selection highlight ───────────────────
     if let Some((sr, sc, er, ec)) = app.selection_range() {
         let area = frame.area();
         let buf = frame.buffer_mut();
         let highlight = Style::default().bg(Color::White).fg(Color::Black);
-        for row in sr..=er {
-            if row >= area.height {
-                break;
-            }
-            let col_start = if row == sr { sc } else {
-                // For multi-line, start from the panel's left edge
-                app.selection_panel.map_or(0, |p| p.x)
-            };
-            let col_end = if row == er { ec } else {
-                // For multi-line, end at the panel's right edge
-                app.selection_panel.map_or(area.width, |p| p.x + p.width)
-            };
-            for col in col_start..col_end {
-                if col >= area.width {
-                    break;
+        
+        if app.selection_is_log {
+            // Convert log line/char coordinates to screen coordinates
+            let (sy, sx) = (app.last_effective_scroll, app.last_effective_scroll_x);
+            let panel = app.log_area;
+            
+            for log_row in sr..=er {
+                // Check if this log line is within the visible viewport
+                if log_row < sy || log_row >= sy + (panel.height.saturating_sub(2) as usize) {
+                    continue;
                 }
-                let pos = ratatui::layout::Position { x: col, y: row };
-                if let Some(cell) = buf.cell_mut(pos) {
-                    cell.set_style(highlight);
+                
+                let line = match app.logs.get(log_row) {
+                    Some(l) => l,
+                    None => continue,
+                };
+                
+                let screen_row = (panel.y + 1) + (log_row - sy) as u16;
+                if screen_row >= area.height { break; }
+
+                let (char_start, char_end, zone_offset) = match app.selection_zone {
+                    crate::tui::app::LogSelectionZone::Metadata => {
+                        let m_width = line.metadata_width();
+                        let s = if log_row == sr { sc } else { 0 };
+                        let e = if log_row == er { ec } else { m_width };
+                        (s.min(m_width), e.min(m_width), 0usize)
+                    }
+                    crate::tui::app::LogSelectionZone::Message => {
+                        let m_width = line.metadata_width();
+                        let s = if log_row == sr { sc } else { 0 };
+                        let e = if log_row == er { ec } else { line.message.len() };
+                        (s, e, m_width)
+                    }
+                    _ => (0, 0, 0),
+                };
+                
+                for zone_col in char_start..char_end {
+                    let log_col = zone_col + zone_offset;
+                    if log_col < sx as usize || log_col >= sx as usize + (panel.width.saturating_sub(2) as usize) {
+                        continue;
+                    }
+                    let screen_col = (panel.x + 1) + (log_col - sx as usize) as u16;
+                    if screen_col >= area.width { break; }
+                    
+                    let pos = ratatui::layout::Position { x: screen_col, y: screen_row };
+                    if let Some(cell) = buf.cell_mut(pos) {
+                        cell.set_style(highlight);
+                    }
+                }
+            }
+        } else {
+            // General screen-based highlighting (for other panels)
+            for row in sr..=er {
+                let row_u16 = row as u16;
+                if row_u16 >= area.height { break; }
+                let col_start = if row == sr { sc as u16 } else {
+                    app.selection_panel.map_or(0, |p| p.x)
+                };
+                let col_end = if row == er { ec as u16 } else {
+                    app.selection_panel.map_or(area.width, |p| p.x + p.width)
+                };
+                for col in col_start..col_end {
+                    if col >= area.width { break; }
+                    let pos = ratatui::layout::Position { x: col, y: row_u16 };
+                    if let Some(cell) = buf.cell_mut(pos) {
+                        cell.set_style(highlight);
+                    }
                 }
             }
         }
