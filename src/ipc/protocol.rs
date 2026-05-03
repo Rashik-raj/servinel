@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::logs::{LogEntry, LogStream};
+use crate::logs::LogEntry;
 use crate::metrics::ServiceMetrics;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,20 +96,11 @@ pub struct LogChunk {
     pub entry: LogEntry,
 }
 
-pub fn format_log_entry(entry: &LogEntry, merged: bool, service: &str) -> String {
-    let prefix = match entry.stream {
-        LogStream::Stdout => "stdout",
-        LogStream::Stderr => "stderr",
-    };
-    
+pub fn format_log_entry(entry: &LogEntry) -> String {
     let time = chrono::DateTime::from_timestamp(entry.timestamp as i64, 0)
         .map(|dt| dt.with_timezone(&chrono::Local))
         .unwrap_or_default();
     let time_str = time.format("%Y-%m-%d %H:%M:%S");
 
-    if merged {
-        format!("[{}] [{}] {}", time_str, service, entry.line)
-    } else {
-        format!("[{}] [{}:{}] {}", time_str, service, prefix, entry.line)
-    }
+    format!("[{}] {}", time_str, entry.line)
 }

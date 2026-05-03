@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::ipc::protocol::{AppSnapshot, ServiceSnapshot};
 use ratatui::layout::Rect;
 
@@ -11,15 +13,14 @@ pub enum LogSelectionZone {
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub timestamp: String,
-    pub service: String,
     pub message: String,
 }
 
 impl LogLine {
     pub fn metadata_width(&self) -> usize {
-        // [YYYY-MM-DD HH:MM:SS] [service] 
-        // 2 (brackets) + timestamp.len() + 2 (space+bracket) + service.len() + 2 (bracket+space)
-        self.timestamp.len() + self.service.len() + 6
+        // [YYYY-MM-DD HH:MM:SS]
+        // 2 (brackets) + timestamp.len() + 1 (space)
+        self.timestamp.len() + 3
     }
 }
 
@@ -33,7 +34,6 @@ pub struct TuiApp {
     pub system_memory_used: u64,
     pub system_memory_total: u64,
     pub scroll: usize,
-    pub scroll_x: u16,
     pub autoscroll: bool,
     /// Last effective scroll used during rendering, for coordinate conversion
     pub last_effective_scroll: usize,
@@ -60,6 +60,8 @@ pub struct TuiApp {
     pub selection_zone: LogSelectionZone,
     /// Whether a drag selection is in progress
     pub selecting: bool,
+    /// Per-service horizontal scroll: (app_name, service_name) -> scroll_x
+    pub per_service_scroll_x: HashMap<(String, String), u16>,
 }
 
 impl Default for TuiApp {
@@ -73,7 +75,6 @@ impl Default for TuiApp {
             system_memory_used: 0,
             system_memory_total: 0,
             scroll: 0,
-            scroll_x: 0,
             autoscroll: true,
             last_effective_scroll: 0,
             last_effective_scroll_x: 0,
@@ -89,6 +90,7 @@ impl Default for TuiApp {
             selection_is_log: false,
             selection_zone: LogSelectionZone::None,
             selecting: false,
+            per_service_scroll_x: HashMap::new(),
         }
     }
 }
@@ -198,13 +200,14 @@ impl TuiApp {
     }
 
     pub fn scroll_left(&mut self) {
-        if self.scroll_x > 0 {
-            self.scroll_x = self.scroll_x.saturating_sub(5);
-        }
+        let scroll_x = self.effective_scroll_x();
+        let new_val = if scroll_x > 0 { scroll_x.saturating_sub(5) } else { 0 };
+        self.set_effective_scroll_x(new_val);
     }
 
     pub fn scroll_right(&mut self) {
-        self.scroll_x = self.scroll_x.saturating_add(5);
+        let scroll_x = self.effective_scroll_x();
+        self.set_effective_scroll_x(scroll_x.saturating_add(5));
     }
 
     pub fn page_up(&mut self) {
@@ -246,7 +249,27 @@ impl TuiApp {
         } else {
             self.scroll.min(max_scroll)
         };
-        (sy, self.scroll_x)
+        let sx = self.effective_scroll_x();
+        (sy, sx)
+    }
+
+    /// Get the effective horizontal scroll for the currently selected service.
+    fn effective_scroll_x(&self) -> u16 {
+        if let (Some(app_name), Some(service_name)) = (self.selected_app_name(), self.selected_service_name()) {
+            self.per_service_scroll_x
+                .get(&(app_name, service_name))
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// Set the horizontal scroll for the currently selected service.
+    fn set_effective_scroll_x(&mut self, value: u16) {
+        if let (Some(app_name), Some(service_name)) = (self.selected_app_name(), self.selected_service_name()) {
+            self.per_service_scroll_x.insert((app_name, service_name), value);
+        }
     }
 
     fn reset_scroll(&mut self) {
@@ -452,7 +475,7 @@ impl TuiApp {
     /// Extract selected text from the screen buffer or logs history.
     pub fn get_selected_text(&self) -> Option<String> {
         let (sr, sc, er, ec) = self.selection_range()?;
-
+        
         let mut lines: Vec<String> = Vec::new();
         
         if self.selection_is_log {
@@ -464,7 +487,7 @@ impl TuiApp {
                 let line = &self.logs[row];
                 let line_chars: Vec<char> = match self.selection_zone {
                     LogSelectionZone::Metadata => {
-                        format!("[{}] [{}] ", line.timestamp, line.service).chars().collect()
+                        format!("[{}] ", line.timestamp).chars().collect()
                     }
                     LogSelectionZone::Message => {
                         line.message.chars().collect()
@@ -500,18 +523,26 @@ impl TuiApp {
                 let line_chars: Vec<char> = self.screen_buffer[row].chars().collect();
                 let line_len = line_chars.len();
 
-                let extracted = if sr == er {
-                    let s = sc.min(line_len);
-                    let e = ec.min(line_len);
-                    line_chars[s..e].iter().collect::<String>()
+                let panel = self.selection_panel.unwrap_or(Rect::default());
+                let inner_left = (panel.x + 1) as usize;
+                let inner_right = (panel.x + panel.width).saturating_sub(1) as usize;
+
+                let (row_start, row_end) = if sr == er {
+                    (sc, ec)
                 } else if row == sr {
-                    let s = sc.min(line_len);
-                    line_chars[s..].iter().collect::<String>()
+                    (sc, inner_right)
                 } else if row == er {
-                    let e = ec.min(line_len);
-                    line_chars[..e].iter().collect::<String>()
+                    (inner_left, ec)
                 } else {
-                    line_chars.iter().collect::<String>()
+                    (inner_left, inner_right)
+                };
+
+                let s = row_start.clamp(inner_left, inner_right).min(line_len);
+                let e = row_end.clamp(inner_left, inner_right).min(line_len);
+                let extracted = if s < e {
+                    line_chars[s..e].iter().collect::<String>()
+                } else {
+                    String::new()
                 };
 
                 lines.push(extracted.trim_end().to_string());
@@ -520,5 +551,367 @@ impl TuiApp {
 
         let result = lines.join("\n");
         if result.trim().is_empty() { None } else { Some(result) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::{AppSnapshot, ServiceSnapshot};
+    use crate::metrics::ServiceMetrics;
+
+    fn setup_app() -> TuiApp {
+        let mut app = TuiApp::default();
+        app.apps = vec![AppSnapshot {
+            app_name: "test-app".to_string(),
+            services: vec![
+                ServiceSnapshot {
+                    name: "svc1".to_string(),
+                    status: "running".to_string(),
+                    pid: Some(123),
+                    uptime_secs: Some(10),
+                    exit_code: None,
+                    metrics: ServiceMetrics::default(),
+                },
+                ServiceSnapshot {
+                    name: "svc2".to_string(),
+                    status: "running".to_string(),
+                    pid: Some(124),
+                    uptime_secs: Some(5),
+                    exit_code: None,
+                    metrics: ServiceMetrics::default(),
+                },
+            ],
+        }];
+        app.selected_app = 0;
+        app.selected_service = 0;
+        app.logs = (0..100)
+            .map(|i| LogLine {
+                timestamp: "2024-01-01 00:00:00".to_string(),
+                message: format!("Log line {}", i),
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn test_vertical_scroll() {
+        let mut app = setup_app();
+        assert!(app.autoscroll);
+
+        // Scroll up should disable autoscroll
+        app.scroll_up();
+        assert!(!app.autoscroll);
+        assert_eq!(app.scroll, 99);
+
+        app.scroll_up();
+        assert_eq!(app.scroll, 98);
+
+        app.scroll_down();
+        assert_eq!(app.scroll, 99);
+
+        // Scrolling past bottom should re-enable autoscroll
+        app.scroll_down();
+        assert!(app.autoscroll);
+    }
+
+    #[test]
+    fn test_horizontal_scroll() {
+        let mut app = setup_app();
+        
+        // Initial scroll_x should be 0
+        assert_eq!(app.effective_scroll_x(), 0);
+
+        app.scroll_right();
+        assert_eq!(app.effective_scroll_x(), 5);
+
+        app.scroll_right();
+        assert_eq!(app.effective_scroll_x(), 10);
+
+        app.scroll_left();
+        assert_eq!(app.effective_scroll_x(), 5);
+
+        app.scroll_left();
+        assert_eq!(app.effective_scroll_x(), 0);
+
+        // Should not go below 0
+        app.scroll_left();
+        assert_eq!(app.effective_scroll_x(), 0);
+    }
+
+    #[test]
+    fn test_per_service_horizontal_scroll() {
+        let mut app = setup_app();
+        
+        // svc1 scroll_right
+        app.scroll_right();
+        assert_eq!(app.effective_scroll_x(), 5);
+
+        // Switch to svc2
+        app.next_service();
+        assert_eq!(app.selected_service, 1);
+        assert_eq!(app.effective_scroll_x(), 0);
+
+        app.scroll_right();
+        app.scroll_right();
+        assert_eq!(app.effective_scroll_x(), 10);
+
+        // Switch back to svc1
+        app.prev_service();
+        assert_eq!(app.selected_service, 0);
+        assert_eq!(app.effective_scroll_x(), 5);
+    }
+
+    #[test]
+    fn test_page_scroll() {
+        let mut app = setup_app();
+        app.autoscroll = false;
+        app.scroll = 50;
+
+        app.page_up();
+        assert_eq!(app.scroll, 35);
+
+        app.page_down();
+        assert_eq!(app.scroll, 50);
+
+        app.scroll_to_top();
+        assert_eq!(app.scroll, 0);
+        assert!(!app.autoscroll);
+
+        app.scroll_to_bottom();
+        assert!(app.autoscroll);
+    }
+
+    #[test]
+    fn test_selection_extraction_constrained() {
+        let mut app = TuiApp::default();
+        // 20 wide terminal for simplicity
+        // 01234567890123456789
+        // LLLLLLLLLL|SSSSSSSSSS
+        app.screen_buffer = vec![
+            "LLLLLLLLLLSSSSSSSSSS".to_string(),
+            "LLLLLLLLLLSSSSSSSSSS".to_string(),
+        ];
+        
+        // Status panel is at x=10, width=10
+        let status_panel = Rect { x: 10, y: 0, width: 10, height: 2 };
+        app.selection_panel = Some(status_panel);
+        app.selection_is_log = false;
+        
+        // Select from (0, 10) to (1, 15)
+        // Row 0, Col 10 (start of status)
+        // Row 1, Col 15 (middle of status)
+        app.selection_anchor = Some((0, 10));
+        app.selection_end = Some((1, 15));
+        
+        let selected = app.get_selected_text().unwrap();
+        // Line 0: index 11 to 20 (clamped to 19) -> "SSSSSSSSS"
+        // Line 1: index 10 (clamped to 11) to 15 -> "SSSS"
+        // Note: inner_left=11, inner_right=19. 
+        // Row 0 start 10 -> clamped to 11. End is inner_right=19. 11..19 is 8 chars.
+        // Row 1 start inner_left=11. End is 15. 11..15 is 4 chars.
+        assert_eq!(selected, "SSSSSSSS\nSSSS");
+    }
+
+    #[test]
+    fn test_selection_extraction_no_borders() {
+        let mut app = TuiApp::default();
+        // 20 wide terminal
+        // |LLLLLLLL||SSSSSSSS|
+        app.screen_buffer = vec![
+            "|LLLLLLLL||SSSSSSSS|".to_string(),
+            "|LLLLLLLL||SSSSSSSS|".to_string(),
+        ];
+        
+        let status_panel = Rect { x: 10, y: 0, width: 10, height: 2 };
+        app.selection_panel = Some(status_panel);
+        app.selection_is_log = false;
+        
+        // Select including the borders: from (0, 10) to (1, 19)
+        app.selection_anchor = Some((0, 10));
+        app.selection_end = Some((1, 19));
+        
+        let selected = app.get_selected_text().unwrap();
+        // Should exclude borders at indices 10 and 19.
+        // Inner range is 11..19.
+        assert_eq!(selected, "SSSSSSSS\nSSSSSSSS");
+    }
+
+    #[test]
+    fn test_log_selection_zones() {
+        let mut app = TuiApp::default();
+        app.logs = vec![LogLine {
+            timestamp: "2024-01-01 12:00:00".to_string(),
+            message: "Hello World".to_string(),
+        }];
+        // metadata_width = 20 (brackets + timestamp + space)
+        // [2024-01-01 12:00:00] 
+        
+        app.log_area = Rect { x: 0, y: 0, width: 50, height: 10 };
+        
+        // 1. Select in Metadata zone (first 5 chars of timestamp)
+        app.start_selection(1, 1); // column 1, row 1 (inside log area, account for border)
+        assert_eq!(app.selection_zone, LogSelectionZone::Metadata);
+        app.update_selection(6, 1);
+        let text = app.get_selected_text().unwrap();
+        assert_eq!(text, "[2024");
+        
+        // 2. Select in Message zone
+        app.clear_selection();
+        // click at column 23. Metadata width is 22.
+        // 23 - 1 (border) = 22. 22 - 22 = 0.
+        app.start_selection(23, 1); 
+        assert_eq!(app.selection_zone, LogSelectionZone::Message);
+        app.update_selection(28, 1); // 28 - 1 - 22 = 5. index 0..5 is "Hello"
+        let text = app.get_selected_text().unwrap();
+        assert_eq!(text, "Hello");
+    }
+
+    #[test]
+    fn test_selection_with_horizontal_scroll() {
+        let mut app = TuiApp::default();
+        app.logs = vec![LogLine {
+            timestamp: "2024-01-01".to_string(),
+            message: "Very long message that is scrolled".to_string(),
+        }];
+        // metadata_width = 13 (brackets + timestamp + space)
+        app.log_area = Rect { x: 0, y: 0, width: 20, height: 10 };
+        
+        // Scroll right by 10
+        app.last_effective_scroll_x = 10;
+        
+        // Click at screen column 4. 
+        // Data column should be 4 - 1 (border) + 10 (scroll) = 13.
+        // Data column 13 is the start of Message zone (13 - 13 = 0).
+        app.start_selection(4, 1);
+        assert_eq!(app.selection_zone, LogSelectionZone::Message);
+        assert_eq!(app.selection_anchor, Some((0, 0))); // message index 0
+    }
+
+    #[test]
+    fn test_autoscroll_stickiness() {
+        let mut app = TuiApp::default();
+        app.log_area = Rect { x: 0, y: 0, width: 50, height: 5 }; // 3 visible lines
+        
+        // Add 10 logs
+        for i in 0..10 {
+            app.logs.push(LogLine { timestamp: "".to_string(), message: i.to_string() });
+        }
+        
+        assert!(app.autoscroll);
+        let (sy, _) = app.calculate_effective_scroll();
+        assert_eq!(sy, 7); // max_scroll = 10 - 3 = 7
+        
+        // User scrolls up (one step up from max_scroll)
+        app.scroll = 6;
+        app.autoscroll = false;
+        
+        // New logs arrive
+        app.logs.push(LogLine { timestamp: "".to_string(), message: "new".to_string() });
+        let (sy_new, _) = app.calculate_effective_scroll();
+        assert_eq!(sy_new, 6); // Still at user's scroll position
+        assert!(!app.autoscroll);
+        
+        // User scrolls back to bottom
+        app.scroll_to_bottom();
+        assert!(app.autoscroll);
+    }
+
+    #[test]
+    fn test_empty_apps_navigation() {
+        let mut app = TuiApp::default();
+        assert!(app.apps.is_empty());
+        
+        // Should not crash
+        app.next_app();
+        app.prev_app();
+        app.next_service();
+        app.prev_service();
+        
+        assert_eq!(app.selected_app, 0);
+        assert_eq!(app.selected_service, 0);
+    }
+
+    #[test]
+    fn test_tab_click_precision() {
+        let mut app = TuiApp::default();
+        app.apps = vec![
+            AppSnapshot { app_name: "A".to_string(), services: vec![] },
+            AppSnapshot { app_name: "B".to_string(), services: vec![] },
+        ];
+        app.app_tab_area = Rect { x: 0, y: 0, width: 50, height: 3 };
+        
+        // Set selected to 1, then click on tab 0 ("A")
+        app.selected_app = 1;
+        assert!(app.click_app_tab(1, 1));
+        assert_eq!(app.selected_app, 0);
+        
+        // Click on tab 1 ("B")
+        assert!(app.click_app_tab(5, 1));
+        assert_eq!(app.selected_app, 1);
+        
+        // Click in between (rel_x 3)
+        // Tab A (0,1,2), Gap (3), Tab B (4,5,6)
+        // rel_x = col - 1. So col 4 is rel_x 3.
+        let prev = app.selected_app;
+        assert!(!app.click_app_tab(4, 1));
+        assert_eq!(app.selected_app, prev);
+    }
+
+    #[test]
+    fn test_selection_extraction_single_line() {
+        let mut app = TuiApp::default();
+        app.screen_buffer = vec!["|0123456789|".to_string()];
+        let panel = Rect { x: 0, y: 0, width: 12, height: 1 };
+        app.selection_panel = Some(panel);
+        app.selection_is_log = false;
+        
+        // Select "234" (indices 3..6)
+        app.selection_anchor = Some((0, 3));
+        app.selection_end = Some((0, 6));
+        
+        let selected = app.get_selected_text().unwrap();
+        assert_eq!(selected, "234");
+    }
+
+    #[test]
+    fn test_selection_extraction_bottom_up() {
+        let mut app = TuiApp::default();
+        app.screen_buffer = vec![
+            "|LINE_0____|".to_string(),
+            "|LINE_1____|".to_string(),
+        ];
+        let panel = Rect { x: 0, y: 0, width: 12, height: 2 };
+        app.selection_panel = Some(panel);
+        app.selection_is_log = false;
+        
+        // Select from bottom-right (1, 10) to top-left (0, 1)
+        app.selection_anchor = Some((1, 10));
+        app.selection_end = Some((0, 1));
+        
+        let selected = app.get_selected_text().unwrap();
+        // Normalized range: (0, 1, 1, 10)
+        // Line 0: index 1 to 11 -> "LINE_0____"
+        // Line 1: index 1 to 10 -> "LINE_1___"
+        assert_eq!(selected, "LINE_0____\nLINE_1___");
+    }
+
+    #[test]
+    fn test_selection_extraction_out_of_bounds_clamping() {
+        let mut app = TuiApp::default();
+        app.screen_buffer = vec!["|CONTENT|".to_string()];
+        let panel = Rect { x: 0, y: 0, width: 9, height: 1 };
+        app.selection_panel = Some(panel);
+        app.selection_is_log = false;
+        
+        // Select from index 0 (border) to 100 (way past terminal)
+        app.selection_anchor = Some((0, 0));
+        app.selection_end = Some((0, 100));
+        
+        let selected = app.get_selected_text().unwrap();
+        // Inner range is 1..8. 
+        // sc=0 -> clamped to 1. ec=100 -> clamped to 8.
+        // index 1 to 8 is "CONTENT"
+        assert_eq!(selected, "CONTENT");
     }
 }

@@ -63,12 +63,31 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(chunks[2]);
 
-    let log_area = body[0];
+    // Split log area into log widget + dedicated horizontal scrollbar row
+    let log_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(body[0]);
+
+    let log_area = log_chunks[0];
     app.log_area = log_area;
+
+    // Calculate max line width and scroll bounds for horizontal scrolling
+    // +1 for trailing space added to each log line for visual padding
+    let max_line_width = app.logs.iter().map(|l| {
+        l.timestamp.len() + 3 + l.message.len() + 1
+    }).max().unwrap_or(0);
+    let visible_width = log_area.width.saturating_sub(2) as usize;
+    let max_scroll_x = max_line_width.saturating_sub(visible_width);
 
     let visible_height = log_area.height.saturating_sub(2) as usize;
 
-    let (effective_scroll, scroll_x) = app.calculate_effective_scroll();
+    let (effective_scroll, mut scroll_x) = app.calculate_effective_scroll();
+    // Clamp horizontal scroll to valid range
+    scroll_x = scroll_x.min(max_scroll_x as u16);
     app.last_effective_scroll = effective_scroll;
     app.last_effective_scroll_x = scroll_x;
     let max_scroll = app.logs.len().saturating_sub(visible_height);
@@ -77,8 +96,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     for log in &app.logs {
         log_lines.push(Line::from(vec![
             Span::styled(format!("[{}] ", log.timestamp), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("[{}] ", log.service), Style::default().fg(Color::Blue)),
             Span::raw(&log.message),
+            Span::raw(" "),
         ]));
     }
     
@@ -101,26 +120,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         &mut scrollbar_state,
     );
 
-    // Horizontal scrollbar
-    // max_width should only consider the message part since selection is only on that
-    let max_msg_width = app.logs.iter().map(|l| l.message.len()).max().unwrap_or(0);
-    let visible_width = log_area.width.saturating_sub(2) as usize;
-    let max_scroll_x = max_msg_width.saturating_sub(visible_width);
-
-    let scrollbar_x = Scrollbar::default()
-        .orientation(ScrollbarOrientation::HorizontalBottom)
-        .thumb_symbol("■")
-        .begin_symbol(Some("←"))
-        .end_symbol(Some("→"));
-    let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(scroll_x as usize);
-    frame.render_stateful_widget(
-        scrollbar_x,
-        log_area.inner(ratatui::layout::Margin {
-            vertical: 0,
-            horizontal: 1,
-        }),
-        &mut scrollbar_x_state,
-    );
+    // Horizontal scrollbar - only show when content overflows
+    if max_scroll_x > 0 {
+        let scrollbar_x = Scrollbar::default()
+            .orientation(ScrollbarOrientation::HorizontalBottom)
+            .thumb_symbol("■")
+            .begin_symbol(Some("←"))
+            .end_symbol(Some("→"));
+        let mut scrollbar_x_state = ScrollbarState::new(max_scroll_x).position(scroll_x as usize);
+        frame.render_stateful_widget(
+            scrollbar_x,
+            log_chunks[1],
+            &mut scrollbar_x_state,
+        );
+    }
 
     let stats_lines = if let Some(service) = app.selected_service() {
         vec![

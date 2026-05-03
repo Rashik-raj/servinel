@@ -217,7 +217,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
                 merged,
             };
             stream_logs(&request, |chunk| {
-                println!("{}", format_log_entry(&chunk.entry, merged, &chunk.service));
+                println!("{}", format_log_entry(&chunk.entry));
             })
             .await?;
         }

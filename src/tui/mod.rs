@@ -35,7 +35,7 @@ pub async fn run() -> Result<()> {
     });
 
     let mut app = TuiApp::default();
-    let mut interval = tokio::time::interval(Duration::from_millis(50));
+    let mut interval = tokio::time::interval(Duration::from_millis(10));
     let mut should_quit = false;
 
     let completed = terminal.draw(|frame| ui::draw(frame, &mut app))?;
@@ -110,19 +110,18 @@ pub async fn run() -> Result<()> {
                     }
                 }
                 Event::Mouse(mouse) => {
+                    let shift_pressed = mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
-                            if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) 
-                               || mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                app.scroll_left();
+                            if shift_pressed {
+                                app.scroll_right();
                             } else {
                                 app.scroll_up();
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
-                               || mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                app.scroll_right();
+                            if shift_pressed {
+                                app.scroll_left();
                             } else {
                                 app.scroll_down();
                             }
@@ -220,7 +219,6 @@ async fn refresh_logs(app: &mut TuiApp) -> Result<()> {
             
             log_lines.push(crate::tui::app::LogLine {
                 timestamp: time_str,
-                service: chunk.service.clone(),
                 message: chunk.entry.line.clone(),
             });
         }),
